@@ -4,3 +4,4 @@ pandas
 pillow
 requests
 beautifulsoup4
+playwright
