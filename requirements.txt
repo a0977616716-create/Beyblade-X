@@ -1,7 +1,6 @@
 streamlit
 pandas
 requests
-beautifulsoup4
 pillow
 playwright
 google-genai
