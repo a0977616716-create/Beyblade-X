@@ -10,9 +10,6 @@ from google.genai import types
 from PIL import Image
 from playwright.sync_api import sync_playwright
 
-# 💡 自動在 Streamlit Cloud 下載 Playwright Chromium 瀏覽器
-os.system("playwright install chromium")
-
 CSV_FILE = "prices.csv"
 
 # ==================== 頁面基本設定 ====================
@@ -57,14 +54,14 @@ if "price_df" not in st.session_state:
 with st.sidebar:
     st.header("⚙️ 系統參數設定")
 
-    # 1. 優先從系統環境變數讀取 API Key (後台設定)
+    # 1. 優先從系統環境變數讀取 API Key
     env_api_key = os.getenv("GEMINI_API_KEY", "")
 
     if env_api_key:
         api_key = env_api_key
         st.success("🔒 已自動載入後台隱藏的 API Key")
     else:
-        # 2. 若後台未設定，才顯示輸入框供手動填寫 (預設留空)
+        # 2. 若後台未設定，才顯示輸入框供手動填寫
         api_key = st.text_input(
             "Google Gemini API Key", value="", type="password"
         )
@@ -113,7 +110,6 @@ def fetch_doorzo_info(doorzo_url):
     match = re.search(r'https?://[^\s]+', doorzo_url)
     clean_url = match.group(0) if match else doorzo_url.strip()
 
-    # 精準定位「主商品價格區塊」，排除折價（值引き）、運費與優惠字樣
     js_get_price = """
     () => {
         const candidates = [];
@@ -159,57 +155,63 @@ def fetch_doorzo_info(doorzo_url):
     }
     """
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
+    try:
+        with sync_playwright() as p:
+            # 專為 Render 雲端 Docker / Linux 環境優化的啟動參數
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
 
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800},
-        )
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+            )
 
-        page = context.new_page()
+            page = context.new_page()
 
-        try:
-            page.goto(clean_url, wait_until="domcontentloaded", timeout=20000)
-            page.wait_for_timeout(2000)
+            try:
+                page.goto(clean_url, wait_until="domcontentloaded", timeout=25000)
+                page.wait_for_timeout(2000)
 
-            for _ in range(10):
-                p_val = page.evaluate(js_get_price)
-                if p_val > 0:
-                    jpy_price = p_val
-                    break
-                page.wait_for_timeout(300)
-
-            img_urls = page.evaluate(js_get_images)
-            for url in img_urls:
-                try:
-                    res = requests.get(
-                        url,
-                        headers={"User-Agent": "Mozilla/5.0"},
-                        timeout=5,
-                    )
-                    if res.status_code == 200 and len(res.content) > 15000:
-                        img_bytes = res.content
+                for _ in range(10):
+                    p_val = page.evaluate(js_get_price)
+                    if p_val > 0:
+                        jpy_price = p_val
                         break
-                except Exception:
-                    pass
+                    page.wait_for_timeout(300)
 
-            if not img_bytes:
-                img_bytes = page.screenshot(
-                    clip={"x": 50, "y": 100, "width": 700, "height": 600}
-                )
+                img_urls = page.evaluate(js_get_images)
+                for url in img_urls:
+                    try:
+                        res = requests.get(
+                            url,
+                            headers={"User-Agent": "Mozilla/5.0"},
+                            timeout=5,
+                        )
+                        if res.status_code == 200 and len(res.content) > 15000:
+                            img_bytes = res.content
+                            break
+                    except Exception:
+                        pass
 
-        except Exception as e:
-            st.error(f"網頁載入時發生錯誤：{e}")
-        finally:
-            browser.close()
+                if not img_bytes:
+                    img_bytes = page.screenshot(
+                        clip={"x": 50, "y": 100, "width": 700, "height": 600}
+                    )
+
+            except Exception as e:
+                st.error(f"網頁載入時發生錯誤：{e}")
+            finally:
+                browser.close()
+    except Exception as e:
+        st.error(f"Playwright 瀏覽器啟動失敗，請確認伺服器環境已安裝 Chromium：{e}")
 
     return jpy_price, img_bytes
 
@@ -236,7 +238,7 @@ def analyze_image_with_gemini(image_bytes, available_models, gemini_api_key):
     """
 
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-2.5-flash",  # 更新為標準穩定模型名稱
         contents=[image, prompt],
         config=types.GenerateContentConfig(
             response_mime_type="application/json"
@@ -257,7 +259,6 @@ with col1:
     if input_type == "貼上 Doorzo 網址":
         url = st.text_input("請貼上 Doorzo 商品頁面連結：")
 
-        # 自動偵測網址變動，免按按鈕！
         if url and url != st.session_state.get("last_url"):
             with st.spinner("自動擷取 Doorzo 商品價格與圖片中..."):
                 jpy_price, fetched_img = fetch_doorzo_info(url)
