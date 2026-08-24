@@ -1,6 +1,6 @@
 streamlit
+google-genai
 pandas
 pillow
-google-genai
+requests
 beautifulsoup4
-playwright
