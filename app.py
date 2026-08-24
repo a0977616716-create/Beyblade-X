@@ -9,7 +9,14 @@ from google import genai
 from google.genai import types
 from PIL import Image
 from playwright.sync_api import sync_playwright
+import os
+import subprocess
 
+# 💡 確保 Playwright 在 Streamlit Cloud 啟動時下載 Chromium
+try:
+    subprocess.run(["playwright", "install", "chromium"], check=True)
+except Exception as e:
+    st.error(f"Playwright 瀏覽器安裝失敗: {e}")
 CSV_FILE = "prices.csv"
 
 # ==================== 頁面基本設定 ====================
