@@ -233,7 +233,7 @@ def analyze_image_with_gemini(image_bytes, available_models, gemini_api_key):
     """
 
     response = client.models.generate_content(
-        model="gemini-3.6-flash",
+        model="gemini-1.5-flash",
         contents=[image, prompt],
         config=types.GenerateContentConfig(
             response_mime_type="application/json"
