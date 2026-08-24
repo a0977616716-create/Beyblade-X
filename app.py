@@ -17,6 +17,25 @@ try:
     subprocess.run(["playwright", "install", "chromium"], check=True)
 except Exception as e:
     st.error(f"Playwright 瀏覽器安裝失敗: {e}")
+import io
+import json
+import os
+import re
+import pandas as pd
+import requests
+import streamlit as st
+from google import genai
+from google.genai import types
+from PIL import Image
+from playwright.sync_api import sync_playwright
+from playwright._impl._driver import compute_driver_executable, get_driver_env
+
+# 💡 確保在 Streamlit Cloud 雲端環境自動下載 Chromium
+try:
+    import subprocess
+    subprocess.run(["playwright", "install", "chromium"], check=True)
+except Exception:
+    pass
 CSV_FILE = "prices.csv"
 
 # ==================== 頁面基本設定 ====================
