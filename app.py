@@ -2,13 +2,13 @@ import io
 import json
 import os
 import re
+from bs4 import BeautifulSoup
 import pandas as pd
 import requests
 import streamlit as st
 from google import genai
 from google.genai import types
 from PIL import Image
-from playwright.sync_api import sync_playwright
 
 CSV_FILE = "prices.csv"
 
@@ -54,14 +54,14 @@ if "price_df" not in st.session_state:
 with st.sidebar:
     st.header("⚙️ 系統參數設定")
 
-    # 1. 優先從系統環境變數讀取 API Key (後台設定)
+    # 1. 優先從系統環境變數讀取 API Key (後台 Secrets 設定)
     env_api_key = os.getenv("GEMINI_API_KEY", "")
 
     if env_api_key:
         api_key = env_api_key
         st.success("🔒 已自動載入後台隱藏的 API Key")
     else:
-        # 2. 若後台未設定，才顯示輸入框供手動填寫 (預設留空)
+        # 2. 若後台未設定，預設留空供手動輸入
         api_key = st.text_input(
             "Google Gemini API Key", value="", type="password"
         )
@@ -102,7 +102,7 @@ with st.sidebar:
             }
 
 
-# ==================== Playwright 精準抓價與商品圖 ====================
+# ==================== Requests + BeautifulSoup 精準抓價與商品圖 ====================
 def fetch_doorzo_info(doorzo_url):
     jpy_price = 0.0
     img_bytes = None
@@ -110,103 +110,71 @@ def fetch_doorzo_info(doorzo_url):
     match = re.search(r'https?://[^\s]+', doorzo_url)
     clean_url = match.group(0) if match else doorzo_url.strip()
 
-    # 精準定位「主商品價格區塊」，排除折價（值引き）、運費與優惠字樣
-    js_get_price = """
-    () => {
-        const candidates = [];
-        const allNodes = Array.from(document.querySelectorAll('*'));
-
-        for (let el of allNodes) {
-            const txt = (el.innerText || '').trim();
-            if (txt.includes('值引き') || txt.includes('折扣') || txt.includes('點につき')) continue;
-
-            const match = txt.match(/¥\\s*([0-9,]+)/) || txt.match(/￥\\s*([0-9,]+)/) || txt.match(/([0-9,]+)\\s*円/);
-            if (match) {
-                const val = parseFloat(match[1].replace(/,/g, ''));
-                if (val >= 100) {
-                    candidates.push(val);
-                }
-            }
-        }
-
-        if (candidates.length > 0) {
-            return Math.max(...candidates);
-        }
-        return 0;
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8,zh-TW;q=0.7,zh;q=0.6",
     }
-    """
 
-    js_get_images = """
-    () => {
-        const validUrls = [];
-        const imgs = Array.from(document.querySelectorAll('img'));
-        for (let i of imgs) {
-            const src = i.src || '';
-            const s = src.toLowerCase();
-            const width = i.naturalWidth || i.clientWidth || 0;
-            const height = i.naturalHeight || i.clientHeight || 0;
-            
-            if (s.includes('banner') || s.includes('logo') || s.includes('icon') || s.includes('coupon') || s.includes('activity')) continue;
-            
-            if (width > 200 && height > 200 && (width / height) < 1.8) {
-                validUrls.push(src);
-            }
-        }
-        return validUrls;
-    }
-    """
+    try:
+        res = requests.get(clean_url, headers=headers, timeout=12)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
+            # 1. 解析日幣價格
+            text_content = soup.get_text()
+            matches = re.findall(r'[￥¥]\s*([0-9,]+)', text_content)
+            if not matches:
+                matches = re.findall(r'([0-9,]+)\s*円', text_content)
 
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800},
-        )
+            prices = []
+            for m in matches:
+                val = float(m.replace(",", ""))
+                if val >= 100:  # 排除小於 100 日圓的無效數字
+                    prices.append(val)
 
-        page = context.new_page()
+            if prices:
+                jpy_price = max(prices)
 
-        try:
-            page.goto(clean_url, wait_until="domcontentloaded", timeout=20000)
-            page.wait_for_timeout(2000)
+            # 2. 解析商品主圖
+            img_tags = soup.find_all("img")
+            for img in img_tags:
+                src = img.get("src") or img.get("data-src") or ""
+                if not src:
+                    continue
 
-            for _ in range(10):
-                p_val = page.evaluate(js_get_price)
-                if p_val > 0:
-                    jpy_price = p_val
-                    break
-                page.wait_for_timeout(300)
+                if not src.startswith("http"):
+                    if src.startswith("//"):
+                        src = "https:" + src
+                    else:
+                        continue
 
-            img_urls = page.evaluate(js_get_images)
-            for url in img_urls:
+                s_lower = src.lower()
+                if any(
+                    k in s_lower
+                    for k in [
+                        "banner",
+                        "logo",
+                        "icon",
+                        "coupon",
+                        "activity",
+                        "avatar",
+                    ]
+                ):
+                    continue
+
                 try:
-                    res = requests.get(
-                        url,
-                        headers={"User-Agent": "Mozilla/5.0"},
-                        timeout=5,
-                    )
-                    if res.status_code == 200 and len(res.content) > 15000:
-                        img_bytes = res.content
+                    img_res = requests.get(src, headers=headers, timeout=5)
+                    if (
+                        img_res.status_code == 200
+                        and len(img_res.content) > 15000
+                    ):
+                        img_bytes = img_res.content
                         break
                 except Exception:
-                    pass
+                    continue
 
-            if not img_bytes:
-                img_bytes = page.screenshot(
-                    clip={"x": 50, "y": 100, "width": 700, "height": 600}
-                )
-
-        except Exception as e:
-            st.error(f"網頁載入時發生錯誤：{e}")
-        finally:
-            browser.close()
+    except Exception as e:
+        st.error(f"抓取網頁資料時發生錯誤：{e}")
 
     return jpy_price, img_bytes
 
@@ -254,7 +222,6 @@ with col1:
     if input_type == "貼上 Doorzo 網址":
         url = st.text_input("請貼上 Doorzo 商品頁面連結：")
 
-        # 自動偵測網址變動，免按按鈕！
         if url and url != st.session_state.get("last_url"):
             with st.spinner("自動擷取 Doorzo 商品價格與圖片中..."):
                 jpy_price, fetched_img = fetch_doorzo_info(url)
