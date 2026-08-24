@@ -237,7 +237,7 @@ def analyze_image_with_gemini(image_bytes, available_models, gemini_api_key):
     """
 
     response = client.models.generate_content(
-        model="gemini-2.0-flash",  # 更新為標準穩定模型名稱
+        model="gemini-3.6-flash",  # 更新為標準穩定模型名稱
         contents=[image, prompt],
         config=types.GenerateContentConfig(
             response_mime_type="application/json"
