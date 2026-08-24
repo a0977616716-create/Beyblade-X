@@ -2,7 +2,6 @@ import io
 import json
 import os
 import re
-from bs4 import BeautifulSoup
 import pandas as pd
 import requests
 import streamlit as st
@@ -54,14 +53,12 @@ if "price_df" not in st.session_state:
 with st.sidebar:
     st.header("⚙️ 系統參數設定")
 
-    # 1. 優先從系統環境變數讀取 API Key (後台 Secrets 設定)
     env_api_key = os.getenv("GEMINI_API_KEY", "")
 
     if env_api_key:
         api_key = env_api_key
         st.success("🔒 已自動載入後台隱藏的 API Key")
     else:
-        # 2. 若後台未設定，預設留空供手動輸入
         api_key = st.text_input(
             "Google Gemini API Key", value="", type="password"
         )
@@ -102,7 +99,7 @@ with st.sidebar:
             }
 
 
-# ==================== Requests + BeautifulSoup 精準抓價與商品圖 ====================
+# ==================== Doorzo API 與 靜態網頁解析雙備援 ====================
 def fetch_doorzo_info(doorzo_url):
     jpy_price = 0.0
     img_bytes = None
@@ -112,69 +109,98 @@ def fetch_doorzo_info(doorzo_url):
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8,zh-TW;q=0.7,zh;q=0.6",
+        "Referer": "https://www.doorzo.com/",
     }
 
-    try:
-        res = requests.get(clean_url, headers=headers, timeout=12)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
+    # 嘗試從 URL 提取商品平台與 ID (例如 rakuma/detail/e3b9a56dc6d17c2faec1b95afb6530ed)
+    url_parts = clean_url.split("/")
+    item_id = ""
+    site_type = ""
 
-            # 1. 解析日幣價格
-            text_content = soup.get_text()
-            matches = re.findall(r'[￥¥]\s*([0-9,]+)', text_content)
-            if not matches:
-                matches = re.findall(r'([0-9,]+)\s*円', text_content)
+    for i, part in enumerate(url_parts):
+        if part in ["rakuma", "mercari", "paypay", "yahoo"]:
+            site_type = part
+            if i + 2 < len(url_parts) and url_parts[i + 1] == "detail":
+                item_id = url_parts[i + 2].split("?")[0]
+            elif i + 1 < len(url_parts):
+                item_id = url_parts[i + 1].split("?")[0]
 
-            prices = []
-            for m in matches:
-                val = float(m.replace(",", ""))
-                if val >= 100:  # 排除小於 100 日圓的無效數字
-                    prices.append(val)
+    # 方案 1: 直接請求 Doorzo API
+    if item_id:
+        try:
+            api_url = f"https://www.doorzo.com/api/item/detail?site={site_type}&id={item_id}"
+            res = requests.get(api_url, headers=headers, timeout=8)
+            if res.status_code == 200:
+                data = res.json()
+                item_data = data.get("data", {}) or data.get("result", {})
+                if item_data:
+                    jpy_price = float(
+                        item_data.get("price")
+                        or item_data.get("jpyPrice")
+                        or 0
+                    )
+                    img_url = item_data.get("cover") or item_data.get(
+                        "image"
+                    ) or (item_data.get("images", [None])[0])
+                    if img_url:
+                        img_res = requests.get(img_url, headers=headers, timeout=5)
+                        if img_res.status_code == 200:
+                            img_bytes = img_res.content
+        except Exception:
+            pass
 
-            if prices:
-                jpy_price = max(prices)
+    # 方案 2: 若 API 失敗，解析 HTML 原始碼中的嵌入 JSON
+    if jpy_price == 0 or not img_bytes:
+        try:
+            res = requests.get(clean_url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                html = res.text
 
-            # 2. 解析商品主圖
-            img_tags = soup.find_all("img")
-            for img in img_tags:
-                src = img.get("src") or img.get("data-src") or ""
-                if not src:
-                    continue
+                # 尋找 HTML 內的 JSON 數據 (Next.js / Nuxt 頁面狀態)
+                json_matches = re.findall(
+                    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+                    html,
+                )
+                if json_matches:
+                    page_data = json.loads(json_matches[0])
+                    # 遞迴搜尋 JSON 中的價格與圖片
+                    str_data = json.dumps(page_data)
 
-                if not src.startswith("http"):
-                    if src.startswith("//"):
-                        src = "https:" + src
-                    else:
-                        continue
+                    prices = re.findall(r'"price":\s*([0-9]+)', str_data)
+                    if prices:
+                        valid_prices = [
+                            float(p) for p in prices if float(p) >= 100
+                        ]
+                        if valid_prices:
+                            jpy_price = valid_prices[0]
 
-                s_lower = src.lower()
-                if any(
-                    k in s_lower
-                    for k in [
-                        "banner",
-                        "logo",
-                        "icon",
-                        "coupon",
-                        "activity",
-                        "avatar",
-                    ]
-                ):
-                    continue
+                    imgs = re.findall(r'https://[^\s"]+\.(?:jpg|png|jpeg)', str_data)
+                    for img_u in imgs:
+                        if not any(
+                            k in img_u.lower()
+                            for k in ["banner", "logo", "icon", "avatar"]
+                        ):
+                            i_res = requests.get(img_u, headers=headers, timeout=5)
+                            if (
+                                i_res.status_code == 200
+                                and len(i_res.content) > 15000
+                            ):
+                                img_bytes = i_res.content
+                                break
 
-                try:
-                    img_res = requests.get(src, headers=headers, timeout=5)
-                    if (
-                        img_res.status_code == 200
-                        and len(img_res.content) > 15000
-                    ):
-                        img_bytes = img_res.content
-                        break
-                except Exception:
-                    continue
-
-    except Exception as e:
-        st.error(f"抓取網頁資料時發生錯誤：{e}")
+                # 備用純文字正則搜尋
+                if jpy_price == 0:
+                    matches = re.findall(r'[￥¥]\s*([0-9,]+)', html)
+                    if matches:
+                        p_vals = [
+                            float(m.replace(",", ""))
+                            for m in matches
+                            if float(m.replace(",", "")) >= 100
+                        ]
+                        if p_vals:
+                            jpy_price = p_vals[0]
+        except Exception as e:
+            st.error(f"解析發生例外情況：{e}")
 
     return jpy_price, img_bytes
 
