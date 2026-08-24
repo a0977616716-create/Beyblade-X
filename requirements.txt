@@ -5,3 +5,4 @@ pillow
 requests
 beautifulsoup4
 playwright
+cmd://python -m playwright install chromium
