@@ -101,7 +101,7 @@ with st.sidebar:
                 else 0,
             }
 
-# ==================== Playwright 高速抓價與商品圖 ====================
+# ==================== Playwright 精準抓價與商品圖 ====================
 def fetch_doorzo_info(doorzo_url):
     jpy_price = 0.0
     img_bytes = None
@@ -134,8 +134,29 @@ def fetch_doorzo_info(doorzo_url):
     }
     """
 
+    js_get_images = """
+    () => {
+        const validUrls = [];
+        const imgs = Array.from(document.querySelectorAll('img'));
+        for (let i of imgs) {
+            const src = i.src || '';
+            const s = src.toLowerCase();
+            const width = i.naturalWidth || i.clientWidth || 0;
+            const height = i.naturalHeight || i.clientHeight || 0;
+            
+            if (s.includes('banner') || s.includes('logo') || s.includes('icon') || s.includes('coupon') || s.includes('activity')) continue;
+            
+            if (width > 200 && height > 200 && (width / height) < 1.8) {
+                validUrls.push(src);
+            }
+        }
+        return validUrls;
+    }
+    """
+
     try:
         with sync_playwright() as p:
+            # 專為 Render 雲端 Docker / Linux 環境優化的啟動參數
             browser = p.chromium.launch(
                 headless=True,
                 args=[
@@ -154,48 +175,42 @@ def fetch_doorzo_info(doorzo_url):
 
             page = context.new_page()
 
-            # 🚀 加速關鍵 1：封鎖不需要的圖片/CSS/字型/廣告載入
-            page.route(
-                "**/*.{png,jpg,jpeg,webp,svg,css,woff,woff2,ttf,otf}",
-                lambda route: route.abort(),
-            )
-
             try:
-                # 🚀 加速關鍵 2：改用 domcontentloaded，不等待外部資源載完
-                page.goto(clean_url, wait_until="domcontentloaded", timeout=15000)
+                page.goto(clean_url, wait_until="domcontentloaded", timeout=25000)
+                page.wait_for_timeout(2000)
 
-                # 快速嘗試抓取價格
-                for _ in range(5):
+                for _ in range(10):
                     p_val = page.evaluate(js_get_price)
                     if p_val > 0:
                         jpy_price = p_val
                         break
-                    page.wait_for_timeout(200)
+                    page.wait_for_timeout(300)
 
-                # 🚀 加速關鍵 3：從 HTML 標籤直接拿商品的原始主圖 URL
-                og_image_url = page.evaluate("""() => {
-                    const og = document.querySelector('meta[property="og:image"]');
-                    if (og && og.content) return og.content;
-                    const twitter = document.querySelector('meta[name="twitter:image"]');
-                    if (twitter && twitter.content) return twitter.content;
-                    return null;
-                }""")
+                img_urls = page.evaluate(js_get_images)
+                for url in img_urls:
+                    try:
+                        res = requests.get(
+                            url,
+                            headers={"User-Agent": "Mozilla/5.0"},
+                            timeout=5,
+                        )
+                        if res.status_code == 200 and len(res.content) > 15000:
+                            img_bytes = res.content
+                            break
+                    except Exception:
+                        pass
 
-                if og_image_url:
-                    res = requests.get(
-                        og_image_url,
-                        headers={"User-Agent": "Mozilla/5.0"},
-                        timeout=5,
+                if not img_bytes:
+                    img_bytes = page.screenshot(
+                        clip={"x": 50, "y": 100, "width": 700, "height": 600}
                     )
-                    if res.status_code == 200:
-                        img_bytes = res.content
 
             except Exception as e:
                 st.error(f"網頁載入時發生錯誤：{e}")
             finally:
                 browser.close()
     except Exception as e:
-        st.error(f"Playwright 瀏覽器啟動失敗：{e}")
+        st.error(f"Playwright 瀏覽器啟動失敗，請確認伺服器環境已安裝 Chromium：{e}")
 
     return jpy_price, img_bytes
 
