@@ -1,0 +1,4 @@
+libxkbcommon0
+libgbm1
+libgtk-3-0
+libasound2
