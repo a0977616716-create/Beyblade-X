@@ -10,7 +10,8 @@ from google.genai import types
 from PIL import Image
 from playwright.sync_api import sync_playwright
 
-# 💡 自動在 Streamlit Cloud 下載 Playwright Chromium 瀏覽器
+# 💡 自動安裝 Playwright 瀏覽器及其 Linux 系統依賴套件
+os.system("playwright install-deps chromium")
 os.system("playwright install chromium")
 
 CSV_FILE = "prices.csv"
