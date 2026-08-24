@@ -1,0 +1,6 @@
+streamlit
+google-genai
+pandas
+pillow
+requests
+beautifulsoup4
