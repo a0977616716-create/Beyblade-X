@@ -54,12 +54,14 @@ if "price_df" not in st.session_state:
 with st.sidebar:
     st.header("⚙️ 系統參數設定")
 
+    # 1. 優先從系統環境變數讀取 API Key (後台設定)
     env_api_key = os.getenv("GEMINI_API_KEY", "")
 
     if env_api_key:
         api_key = env_api_key
         st.success("🔒 已自動載入後台隱藏的 API Key")
     else:
+        # 2. 若後台未設定，才顯示輸入框供手動填寫 (預設留空)
         api_key = st.text_input(
             "Google Gemini API Key", value="", type="password"
         )
@@ -105,9 +107,10 @@ def fetch_doorzo_info(doorzo_url):
     jpy_price = 0.0
     img_bytes = None
 
-    match = re.search(r"https?://[^\s]+", doorzo_url)
+    match = re.search(r'https?://[^\s]+', doorzo_url)
     clean_url = match.group(0) if match else doorzo_url.strip()
 
+    # 精準定位「主商品價格區塊」，排除折價（值引き）、運費與優惠字樣
     js_get_price = """
     () => {
         const candidates = [];
@@ -229,9 +232,8 @@ def analyze_image_with_gemini(image_bytes, available_models, gemini_api_key):
     }}
     """
 
-    # 修正：使用正確的模型名稱 gemini-2.5-flash
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",
         contents=[image, prompt],
         config=types.GenerateContentConfig(
             response_mime_type="application/json"
@@ -252,25 +254,23 @@ with col1:
     if input_type == "貼上 Doorzo 網址":
         url = st.text_input("請貼上 Doorzo 商品頁面連結：")
 
-        # 增加按鈕，避免貼上網址觸發輸入時重複 Rerun
-        if st.button("🔍 擷取 Doorzo 頁面資訊"):
-            if url:
-                with st.spinner("擷取 Doorzo 商品價格與圖片中..."):
-                    jpy_price, fetched_img = fetch_doorzo_info(url)
+        # 自動偵測網址變動，免按按鈕！
+        if url and url != st.session_state.get("last_url"):
+            with st.spinner("自動擷取 Doorzo 商品價格與圖片中..."):
+                jpy_price, fetched_img = fetch_doorzo_info(url)
+                st.session_state["last_url"] = url
 
-                    if jpy_price > 0:
-                        st.session_state["jpy_price"] = jpy_price
-                        st.success(
-                            f"✅ 自動擷取日幣價格：￥{jpy_price:,.0f} JPY"
-                        )
-                    else:
-                        st.warning("⚠️ 日幣價格抓取失敗，請手動輸入。")
+                if jpy_price > 0:
+                    st.session_state["jpy_price"] = jpy_price
+                    st.success(f"✅ 自動擷取日幣價格：￥{jpy_price:,.0f} JPY")
+                else:
+                    st.warning("⚠️ 日幣價格抓取失敗，請手動輸入。")
 
-                    if fetched_img:
-                        st.session_state["image_bytes"] = fetched_img
-                        st.success("✅ 自動擷取商品圖片成功！")
-                    else:
-                        st.warning("⚠️ 圖片抓取失敗，請手動補上傳。")
+                if fetched_img:
+                    st.session_state["image_bytes"] = fetched_img
+                    st.success("✅ 自動擷取商品圖片成功！")
+                else:
+                    st.warning("⚠️ 圖片抓取失敗，請手動補上傳。")
 
         jpy_price_input = st.number_input(
             "商品日幣售價 (JPY) [可手動調整]：",
@@ -326,9 +326,7 @@ with col2:
                     total_quantity = sum(item["quantity"] for item in items)
                     shipping_units = max(total_quantity, 1)
 
-                    total_shipping_fee = (
-                        shipping_fee_per_unit * shipping_units
-                    )
+                    total_shipping_fee = shipping_fee_per_unit * shipping_units
 
                     calc_jpy = (
                         jpy_price_input
@@ -381,12 +379,9 @@ with col2:
 
                     st.write("### 📊 成本與獲利估算")
                     m1, m2, m3 = st.columns(3)
-                    m1.metric(
-                        "預估總進貨成本", f"${total_cost_twd:,.0f} TWD"
-                    )
+                    m1.metric("預估總進貨成本", f"${total_cost_twd:,.0f} TWD")
                     m2.metric(
-                        "預估總銷售額",
-                        f"${total_expected_revenue:,.0f} TWD",
+                        "預估總銷售額", f"${total_expected_revenue:,.0f} TWD"
                     )
                     m3.metric(
                         "預估淨利潤",
