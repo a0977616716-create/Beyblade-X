@@ -10,6 +10,9 @@ from google.genai import types
 from PIL import Image
 from playwright.sync_api import sync_playwright
 
+# 💡 自動在 Streamlit Cloud 下載 Playwright Chromium 瀏覽器
+os.system("playwright install chromium")
+
 CSV_FILE = "prices.csv"
 
 # ==================== 頁面基本設定 ====================
@@ -107,7 +110,7 @@ def fetch_doorzo_info(doorzo_url):
     jpy_price = 0.0
     img_bytes = None
 
-    match = re.search(r'https?://[^\s]+', doorzo_url)
+    match = re.search(r"https?://[^\s]+", doorzo_url)
     clean_url = match.group(0) if match else doorzo_url.strip()
 
     # 精準定位「主商品價格區塊」，排除折價（值引き）、運費與優惠字樣
@@ -156,24 +159,26 @@ def fetch_doorzo_info(doorzo_url):
     }
     """
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
 
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800},
-        )
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+            )
 
-        page = context.new_page()
+            page = context.new_page()
 
-        try:
             page.goto(clean_url, wait_until="domcontentloaded", timeout=20000)
             page.wait_for_timeout(2000)
 
@@ -203,10 +208,10 @@ def fetch_doorzo_info(doorzo_url):
                     clip={"x": 50, "y": 100, "width": 700, "height": 600}
                 )
 
-        except Exception as e:
-            st.error(f"網頁載入時發生錯誤：{e}")
-        finally:
             browser.close()
+
+    except Exception as e:
+        st.error(f"網頁載入時發生錯誤：{e}")
 
     return jpy_price, img_bytes
 
@@ -233,7 +238,7 @@ def analyze_image_with_gemini(image_bytes, available_models, gemini_api_key):
     """
 
     response = client.models.generate_content(
-        model="gemini-3.6-flash",
+        model="gemini-2.5-flash",
         contents=[image, prompt],
         config=types.GenerateContentConfig(
             response_mime_type="application/json"
