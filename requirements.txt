@@ -1,6 +1,0 @@
-streamlit
-pandas
-requests
-pillow
-playwright
-google-genai
