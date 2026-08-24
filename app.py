@@ -8,6 +8,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 from PIL import Image
+from playwright.sync_api import sync_playwright
 
 CSV_FILE = "prices.csv"
 
@@ -99,108 +100,110 @@ with st.sidebar:
             }
 
 
-# ==================== Doorzo API 與 靜態網頁解析雙備援 ====================
+# ==================== Playwright 精準抓價與商品圖 ====================
 def fetch_doorzo_info(doorzo_url):
     jpy_price = 0.0
     img_bytes = None
 
-    match = re.search(r'https?://[^\s]+', doorzo_url)
+    match = re.search(r"https?://[^\s]+", doorzo_url)
     clean_url = match.group(0) if match else doorzo_url.strip()
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://www.doorzo.com/",
+    js_get_price = """
+    () => {
+        const candidates = [];
+        const allNodes = Array.from(document.querySelectorAll('*'));
+
+        for (let el of allNodes) {
+            const txt = (el.innerText || '').trim();
+            if (txt.includes('值引き') || txt.includes('折扣') || txt.includes('點につき')) continue;
+
+            const match = txt.match(/¥\\s*([0-9,]+)/) || txt.match(/￥\\s*([0-9,]+)/) || txt.match(/([0-9,]+)\\s*円/);
+            if (match) {
+                const val = parseFloat(match[1].replace(/,/g, ''));
+                if (val >= 100) {
+                    candidates.push(val);
+                }
+            }
+        }
+
+        if (candidates.length > 0) {
+            return Math.max(...candidates);
+        }
+        return 0;
     }
+    """
 
-    # 嘗試從 URL 提取商品平台與 ID (例如 rakuma/detail/e3b9a56dc6d17c2faec1b95afb6530ed)
-    url_parts = clean_url.split("/")
-    item_id = ""
-    site_type = ""
+    js_get_images = """
+    () => {
+        const validUrls = [];
+        const imgs = Array.from(document.querySelectorAll('img'));
+        for (let i of imgs) {
+            const src = i.src || '';
+            const s = src.toLowerCase();
+            const width = i.naturalWidth || i.clientWidth || 0;
+            const height = i.naturalHeight || i.clientHeight || 0;
+            
+            if (s.includes('banner') || s.includes('logo') || s.includes('icon') || s.includes('coupon') || s.includes('activity')) continue;
+            
+            if (width > 200 && height > 200 && (width / height) < 1.8) {
+                validUrls.push(src);
+            }
+        }
+        return validUrls;
+    }
+    """
 
-    for i, part in enumerate(url_parts):
-        if part in ["rakuma", "mercari", "paypay", "yahoo"]:
-            site_type = part
-            if i + 2 < len(url_parts) and url_parts[i + 1] == "detail":
-                item_id = url_parts[i + 2].split("?")[0]
-            elif i + 1 < len(url_parts):
-                item_id = url_parts[i + 1].split("?")[0]
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
 
-    # 方案 1: 直接請求 Doorzo API
-    if item_id:
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800},
+        )
+
+        page = context.new_page()
+
         try:
-            api_url = f"https://www.doorzo.com/api/item/detail?site={site_type}&id={item_id}"
-            res = requests.get(api_url, headers=headers, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                item_data = data.get("data", {}) or data.get("result", {})
-                if item_data:
-                    jpy_price = float(
-                        item_data.get("price")
-                        or item_data.get("jpyPrice")
-                        or 0
+            page.goto(clean_url, wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(2000)
+
+            for _ in range(10):
+                p_val = page.evaluate(js_get_price)
+                if p_val > 0:
+                    jpy_price = p_val
+                    break
+                page.wait_for_timeout(300)
+
+            img_urls = page.evaluate(js_get_images)
+            for url in img_urls:
+                try:
+                    res = requests.get(
+                        url,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                        timeout=5,
                     )
-                    img_url = item_data.get("cover") or item_data.get(
-                        "image"
-                    ) or (item_data.get("images", [None])[0])
-                    if img_url:
-                        img_res = requests.get(img_url, headers=headers, timeout=5)
-                        if img_res.status_code == 200:
-                            img_bytes = img_res.content
-        except Exception:
-            pass
+                    if res.status_code == 200 and len(res.content) > 15000:
+                        img_bytes = res.content
+                        break
+                except Exception:
+                    pass
 
-    # 方案 2: 若 API 失敗，解析 HTML 原始碼中的嵌入 JSON
-    if jpy_price == 0 or not img_bytes:
-        try:
-            res = requests.get(clean_url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                html = res.text
-
-                # 尋找 HTML 內的 JSON 數據 (Next.js / Nuxt 頁面狀態)
-                json_matches = re.findall(
-                    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
-                    html,
+            if not img_bytes:
+                img_bytes = page.screenshot(
+                    clip={"x": 50, "y": 100, "width": 700, "height": 600}
                 )
-                if json_matches:
-                    page_data = json.loads(json_matches[0])
-                    # 遞迴搜尋 JSON 中的價格與圖片
-                    str_data = json.dumps(page_data)
 
-                    prices = re.findall(r'"price":\s*([0-9]+)', str_data)
-                    if prices:
-                        valid_prices = [
-                            float(p) for p in prices if float(p) >= 100
-                        ]
-                        if valid_prices:
-                            jpy_price = valid_prices[0]
-
-                    imgs = re.findall(r'https://[^\s"]+\.(?:jpg|png|jpeg)', str_data)
-                    for img_u in imgs:
-                        if not any(
-                            k in img_u.lower()
-                            for k in ["banner", "logo", "icon", "avatar"]
-                        ):
-                            i_res = requests.get(img_u, headers=headers, timeout=5)
-                            if (
-                                i_res.status_code == 200
-                                and len(i_res.content) > 15000
-                            ):
-                                img_bytes = i_res.content
-                                break
-
-                # 備用純文字正則搜尋
-                if jpy_price == 0:
-                    matches = re.findall(r'[￥¥]\s*([0-9,]+)', html)
-                    if matches:
-                        p_vals = [
-                            float(m.replace(",", ""))
-                            for m in matches
-                            if float(m.replace(",", "")) >= 100
-                        ]
-                        if p_vals:
-                            jpy_price = p_vals[0]
         except Exception as e:
-            st.error(f"解析發生例外情況：{e}")
+            st.error(f"網頁載入時發生錯誤：{e}")
+        finally:
+            browser.close()
 
     return jpy_price, img_bytes
 
@@ -226,8 +229,9 @@ def analyze_image_with_gemini(image_bytes, available_models, gemini_api_key):
     }}
     """
 
+    # 修正：使用正確的模型名稱 gemini-2.5-flash
     response = client.models.generate_content(
-        model="gemini-3.6-flash",
+        model="gemini-2.5-flash",
         contents=[image, prompt],
         config=types.GenerateContentConfig(
             response_mime_type="application/json"
@@ -248,22 +252,25 @@ with col1:
     if input_type == "貼上 Doorzo 網址":
         url = st.text_input("請貼上 Doorzo 商品頁面連結：")
 
-        if url and url != st.session_state.get("last_url"):
-            with st.spinner("自動擷取 Doorzo 商品價格與圖片中..."):
-                jpy_price, fetched_img = fetch_doorzo_info(url)
-                st.session_state["last_url"] = url
+        # 增加按鈕，避免貼上網址觸發輸入時重複 Rerun
+        if st.button("🔍 擷取 Doorzo 頁面資訊"):
+            if url:
+                with st.spinner("擷取 Doorzo 商品價格與圖片中..."):
+                    jpy_price, fetched_img = fetch_doorzo_info(url)
 
-                if jpy_price > 0:
-                    st.session_state["jpy_price"] = jpy_price
-                    st.success(f"✅ 自動擷取日幣價格：￥{jpy_price:,.0f} JPY")
-                else:
-                    st.warning("⚠️ 日幣價格抓取失敗，請手動輸入。")
+                    if jpy_price > 0:
+                        st.session_state["jpy_price"] = jpy_price
+                        st.success(
+                            f"✅ 自動擷取日幣價格：￥{jpy_price:,.0f} JPY"
+                        )
+                    else:
+                        st.warning("⚠️ 日幣價格抓取失敗，請手動輸入。")
 
-                if fetched_img:
-                    st.session_state["image_bytes"] = fetched_img
-                    st.success("✅ 自動擷取商品圖片成功！")
-                else:
-                    st.warning("⚠️ 圖片抓取失敗，請手動補上傳。")
+                    if fetched_img:
+                        st.session_state["image_bytes"] = fetched_img
+                        st.success("✅ 自動擷取商品圖片成功！")
+                    else:
+                        st.warning("⚠️ 圖片抓取失敗，請手動補上傳。")
 
         jpy_price_input = st.number_input(
             "商品日幣售價 (JPY) [可手動調整]：",
@@ -319,7 +326,9 @@ with col2:
                     total_quantity = sum(item["quantity"] for item in items)
                     shipping_units = max(total_quantity, 1)
 
-                    total_shipping_fee = shipping_fee_per_unit * shipping_units
+                    total_shipping_fee = (
+                        shipping_fee_per_unit * shipping_units
+                    )
 
                     calc_jpy = (
                         jpy_price_input
@@ -372,9 +381,12 @@ with col2:
 
                     st.write("### 📊 成本與獲利估算")
                     m1, m2, m3 = st.columns(3)
-                    m1.metric("預估總進貨成本", f"${total_cost_twd:,.0f} TWD")
+                    m1.metric(
+                        "預估總進貨成本", f"${total_cost_twd:,.0f} TWD"
+                    )
                     m2.metric(
-                        "預估總銷售額", f"${total_expected_revenue:,.0f} TWD"
+                        "預估總銷售額",
+                        f"${total_expected_revenue:,.0f} TWD",
                     )
                     m3.metric(
                         "預估淨利潤",
