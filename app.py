@@ -10,9 +10,6 @@ from google.genai import types
 from PIL import Image
 from playwright.sync_api import sync_playwright
 
-# 💡 自動在 Streamlit Cloud 下載 Playwright Chromium 瀏覽器
-os.system("playwright install chromium")
-
 CSV_FILE = "prices.csv"
 
 # ==================== 頁面基本設定 ====================
@@ -110,7 +107,7 @@ def fetch_doorzo_info(doorzo_url):
     jpy_price = 0.0
     img_bytes = None
 
-    match = re.search(r"https?://[^\s]+", doorzo_url)
+    match = re.search(r'https?://[^\s]+', doorzo_url)
     clean_url = match.group(0) if match else doorzo_url.strip()
 
     # 精準定位「主商品價格區塊」，排除折價（值引き）、運費與優惠字樣
@@ -165,8 +162,6 @@ def fetch_doorzo_info(doorzo_url):
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
                 "--disable-blink-features=AutomationControlled",
             ],
         )
@@ -238,7 +233,7 @@ def analyze_image_with_gemini(image_bytes, available_models, gemini_api_key):
     """
 
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-3.6-flash",
         contents=[image, prompt],
         config=types.GenerateContentConfig(
             response_mime_type="application/json"
